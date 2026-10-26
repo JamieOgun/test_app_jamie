@@ -1,0 +1,35 @@
+version = 1
+revision = 2
+requires-python = ">=3.13"
+
+[[package]]
+name = "palmimo-sdk"
+version = "0.1.4"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pyserial" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/6b/6e/ededa2f2b2dea8744d727983565e16894994476803b1b95282027ab3fc35/palmimo_sdk-0.1.4.tar.gz", hash = "sha256:83f44bfe3b5fefc183af2a2a0a83c41327eea96116c2aac9b755701d4cdd4045", size = 406226, upload-time = "2026-10-05T12:37:19.175Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d3/7b/758c61f3a9bdb6948a10c657d75f246cbf61d35c27fb754fe428708ee5fb/palmimo_sdk-0.1.4-py3-none-any.whl", hash = "sha256:9a0ce666f0e0af77a8969fb896fb2dadad6c9503ee414b804fe32a44d5606018", size = 262950, upload-time = "2026-10-05T12:37:17.835Z" },
+]
+
+[[package]]
+name = "pyserial"
+version = "3.5"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1e/7d/ae3f0a63f41e4d2f6cb66a5b57197850f919f59e558159a4dd3a818f5082/pyserial-3.5.tar.gz", hash = "sha256:3c77e014170dfffbd816e6ffc205e9842efb10be9f58ec16d3e8675b4925cddb", size = 159125, upload-time = "2020-11-23T03:59:15.045Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/07/bc/587a445451b253b285629263eb51c2d8e9bcea4fc97826266d186f96f558/pyserial-3.5-py2.py3-none-any.whl", hash = "sha256:c4451db6ba391ca6ca299fb3ec7bae67a5c55dde170964c7a14ceefec02f2cf0", size = 90585, upload-time = "2020-11-23T03:59:13.41Z" },
+]
+
+[[package]]
+name = "test-app-jamie"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "palmimo-sdk" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "palmimo-sdk", specifier = ">=0.1.4" }]

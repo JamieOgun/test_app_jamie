@@ -5,8 +5,8 @@ schema = 1
 
 # アプリ名。英小文字・数字・ハイフン（先頭は英字、40 文字まで）。
 # 端末上の ID は「<入れた場所>.<name>」になる（GitHub なら owner 名、zip なら zip）。
-name = "my-app"
-description = "Palmimo アプリのテンプレート。Portal で設定した値をログに出します。"
+name = "elevenlabs-integration"
+description = "ElevenLabs integration for Palmimo."
 
 # 起動コマンド。シェルは通さないので配列で書く。{param} は下の params の値に置き換わる。
 # Portal はこれをアプリのディレクトリで `uv run` 経由で実行する。
