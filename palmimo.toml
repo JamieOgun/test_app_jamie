@@ -1,0 +1,35 @@
+# Palmimo Portal がこのアプリを一覧に出し、設定フォームを作り、起動するための定義。
+# 仕様: https://github.com/Jizai-inc/palmimo-devkit/blob/main/doc/reference/app-manifest.md
+
+schema = 1
+
+# アプリ名。英小文字・数字・ハイフン（先頭は英字、40 文字まで）。
+# 端末上の ID は「<入れた場所>.<name>」になる（GitHub なら owner 名、zip なら zip）。
+name = "my-app"
+description = "Palmimo アプリのテンプレート。Portal で設定した値をログに出します。"
+
+# 起動コマンド。シェルは通さないので配列で書く。{param} は下の params の値に置き換わる。
+# Portal はこれをアプリのディレクトリで `uv run` 経由で実行する。
+command = ["python", "main.py", "--message", "{message}", "--repeat", "{repeat}"]
+
+# 使うデバイス。camera / audio / motor_display から選ぶ。書かなければどのデバイスも開けない。
+# devices = ["motor_display"]
+
+[params.message]
+type = "string"
+default = "こんにちは、Palmimo!"
+max_length = 100
+description = "ログに出すメッセージ"
+
+[params.repeat]
+type = "int"
+default = 3
+min = 1
+max = 10
+description = "くり返す回数"
+
+# API キーなど、秘密にしたい値は env で宣言する。値は Portal の「環境変数」画面で入れる。
+# [env.EXAMPLE_API_KEY]
+# required = false
+# description = "外部サービスの API キー"
+# help_url = "https://example.com/api-keys"
