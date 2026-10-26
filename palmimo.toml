@@ -2,34 +2,55 @@
 # 仕様: https://github.com/Jizai-inc/palmimo-devkit/blob/main/doc/reference/app-manifest.md
 
 schema = 1
+name = "elevenlabs-voice"
+description = "Speak a line on Palmimo's speaker with an ElevenLabs voice. Audio tags such as [excited] change the delivery."
 
-# アプリ名。英小文字・数字・ハイフン（先頭は英字、40 文字まで）。
-# 端末上の ID は「<入れた場所>.<name>」になる（GitHub なら owner 名、zip なら zip）。
-name = "elevenlabs-integration"
-description = "ElevenLabs integration for Palmimo."
+# Run through `uv run` in the app's directory. {param} is replaced with the value set below.
+command = [
+  "python", "main.py",
+  "--text", "{text}",
+  "--lang", "{lang}",
+  "--voice-id", "{voice_id}",
+  "--speed", "{speed}",
+  "--volume", "{volume}",
+]
 
-# 起動コマンド。シェルは通さないので配列で書く。{param} は下の params の値に置き換わる。
-# Portal はこれをアプリのディレクトリで `uv run` 経由で実行する。
-command = ["python", "main.py", "--message", "{message}", "--repeat", "{repeat}"]
+# The speaker is part of the audio device.
+devices = ["audio"]
 
-# 使うデバイス。camera / audio / motor_display から選ぶ。書かなければどのデバイスも開けない。
-# devices = ["motor_display"]
-
-[params.message]
+[params.text]
 type = "string"
-default = "こんにちは、Palmimo!"
-max_length = 100
-description = "ログに出すメッセージ"
+default = "[excited] Hello! I'm Palmimo."
+max_length = 200
+description = "What to say. May include ElevenLabs audio tags such as [excited] or [whispers]."
 
-[params.repeat]
-type = "int"
-default = 3
-min = 1
-max = 10
-description = "くり返す回数"
+[params.lang]
+type = "enum"
+choices = ["en", "ja"]
+default = "en"
+description = "Language of the text."
 
-# API キーなど、秘密にしたい値は env で宣言する。値は Portal の「環境変数」画面で入れる。
-# [env.EXAMPLE_API_KEY]
-# required = false
-# description = "外部サービスの API キー"
-# help_url = "https://example.com/api-keys"
+[params.voice_id]
+type = "string"
+default = "JBFqnCBsd6RMkjVDRZzb"
+pattern = "^[A-Za-z0-9]{1,64}$"
+description = "Voice id from the ElevenLabs voice library."
+
+[params.speed]
+type = "float"
+default = 1.0
+min = 0.7
+max = 1.2
+description = "Speaking rate; 1.0 is natural, higher is faster."
+
+[params.volume]
+type = "float"
+default = 1.0
+min = 0.0
+max = 3.0
+description = "Output gain; 1.0 is the voice's own level."
+
+[env.ELEVENLABS_API_KEY]
+required = true
+description = "ElevenLabs API key used to synthesize the voice."
+help_url = "https://elevenlabs.io/app/settings/api-keys"
