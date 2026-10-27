@@ -13,6 +13,7 @@ command = [
   "--voice-id", "{voice_id}",
   "--speed", "{speed}",
   "--volume", "{volume}",
+  "--speaker-device", "{speaker_device}",
 ]
 
 # The speaker is part of the audio device.
@@ -49,6 +50,13 @@ default = 1.0
 min = 0.0
 max = 3.0
 description = "Output gain; 1.0 is the voice's own level."
+
+[params.speaker_device]
+type = "string"
+default = "ReSpeaker"
+pattern = "^[A-Za-z0-9 ._()-]{0,64}$"
+max_length = 64
+description = "Speaker to play through: part of its card name from `aplay -l`. Leave empty for the system default."
 
 [env.ELEVENLABS_API_KEY]
 required = true

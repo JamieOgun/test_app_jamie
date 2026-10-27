@@ -23,6 +23,11 @@ def main() -> int:
     parser.add_argument("--voice-id", default=DEFAULT_VOICE_ID)
     parser.add_argument("--speed", type=float, default=1.0)
     parser.add_argument("--volume", type=float, default=1.0)
+    parser.add_argument(
+        "--speaker-device",
+        default="ReSpeaker",
+        help="Part of the playback card's name in `aplay -l`; empty uses the ALSA default",
+    )
     args = parser.parse_args()
 
     # The Portal's log view shows stdout and stderr as they are.
@@ -33,8 +38,9 @@ def main() -> int:
         return 1
 
     engine = ElevenLabsEngine(voice_id=args.voice_id, speed=args.speed, volume=args.volume)
-    # Name the device: on the Pi, the ALSA default is often an HDMI output with no speaker.
-    with Speaker(SpeakerConfig(lang=args.lang, device_name_hint="ReSpeaker"), engine=engine) as speaker:
+    # Name the device: on the Pi, the ALSA default is often an output with no speaker on it.
+    config = SpeakerConfig(lang=args.lang, device_name_hint=args.speaker_device or None)
+    with Speaker(config, engine=engine) as speaker:
         logger.info("speaking (%s, voice %s): %s", args.lang, args.voice_id, args.text)
         handle = speaker.say(args.text)
         handle.join()
