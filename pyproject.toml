@@ -1,9 +1,14 @@
 [project]
 name = "test-app-jamie"
 version = "0.1.0"
-description = "Speak text on Palmimo with an ElevenLabs voice."
+description = "A Palmimo companion robot that talks with an ElevenLabs voice."
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.12,<3.13"
 dependencies = [
+    "palmimo-companion-agent",
     "palmimo-sdk>=0.1.4",
+    "piper-plus<2",
 ]
+
+[tool.uv.sources]
+palmimo-companion-agent = { git = "https://github.com/Jizai-inc/palmimo-devkit", subdirectory = "examples/agents/companion", rev = "f68a5909d02054544d57dba16b272f41e60527f9" }

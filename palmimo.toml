@@ -3,33 +3,47 @@
 
 schema = 1
 name = "elevenlabs-voice"
-description = "Speak a line on Palmimo's speaker with an ElevenLabs voice. Audio tags such as [excited] change the delivery."
+description = "Companion robot: listens, talks back with an ElevenLabs voice, moves and makes faces, and idles on its own."
 
 # Run through `uv run` in the app's directory. {param} is replaced with the value set below.
+# --ui cli --no-stdin runs the companion headless until the Portal stops it.
 command = [
   "python", "main.py",
-  "--text", "{text}",
-  "--lang", "{lang}",
+  "--ui", "cli",
+  "--no-stdin",
+  "--language", "{language}",
+  "--chat-model", "{chat_model}",
+  "--stt-model", "{stt_model}",
   "--voice-id", "{voice_id}",
-  "--speed", "{speed}",
-  "--volume", "{volume}",
+  "--stability", "{stability}",
+  "--voice-speed", "{voice_speed}",
+  "--voice-volume", "{voice_volume}",
   "--speaker-device", "{speaker_device}",
+  "--mic-device", "{mic_device}",
+  "{echo_cancel}",
 ]
 
-# The speaker is part of the audio device.
-devices = ["audio"]
+# Camera for waving back and face tracking, audio for the mic and speaker,
+# motor_display for the servos and the face screen.
+devices = ["camera", "audio", "motor_display"]
 
-[params.text]
-type = "string"
-default = "[excited] Hello! I'm Palmimo."
-max_length = 200
-description = "What to say. May include ElevenLabs audio tags such as [excited] or [whispers]."
-
-[params.lang]
+[params.language]
 type = "enum"
-choices = ["en", "ja"]
-default = "en"
-description = "Language of the text."
+choices = ["ja", "en"]
+default = "ja"
+description = "Language Palmimo listens for and answers in."
+
+[params.chat_model]
+type = "string"
+default = "gemini/gemini-3.5-flash-lite"
+pattern = "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+description = "LLM that decides what Palmimo says and does (a LiteLLM model name)."
+
+[params.stt_model]
+type = "string"
+default = "elevenlabs/scribe_v2"
+pattern = "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+description = "Speech-to-text model for what Palmimo hears (a LiteLLM model name). The default uses the ElevenLabs key."
 
 [params.voice_id]
 type = "string"
@@ -37,14 +51,21 @@ default = "JBFqnCBsd6RMkjVDRZzb"
 pattern = "^[A-Za-z0-9]{1,64}$"
 description = "Voice id from the ElevenLabs voice library."
 
-[params.speed]
+[params.stability]
+type = "float"
+default = 0.4
+min = 0.0
+max = 1.0
+description = "Lower is more expressive and varies between lines; higher is steadier."
+
+[params.voice_speed]
 type = "float"
 default = 1.0
 min = 0.7
 max = 1.2
 description = "Speaking rate; 1.0 is natural, higher is faster."
 
-[params.volume]
+[params.voice_volume]
 type = "float"
 default = 1.0
 min = 0.0
@@ -58,7 +79,30 @@ pattern = "^[A-Za-z0-9 ._()-]{0,64}$"
 max_length = 64
 description = "Speaker to play through: part of its card name from `aplay -l`. Leave empty for the system default."
 
+[params.mic_device]
+type = "string"
+default = "ReSpeaker"
+pattern = "^[A-Za-z0-9 ._()-]{0,64}$"
+max_length = 64
+description = "Microphone to listen with: part of its name from `arecord -l`. Leave empty for the system default."
+
+[params.echo_cancel]
+type = "bool"
+default = true
+flag = "--echo-cancel"
+description = "Cancel the robot's own voice from the mic. Needs a ReSpeaker; turn off for a plain USB mic."
+
 [env.ELEVENLABS_API_KEY]
 required = true
-description = "ElevenLabs API key used to synthesize the voice."
+description = "ElevenLabs API key, used for Palmimo's voice and for speech-to-text."
 help_url = "https://elevenlabs.io/app/settings/api-keys"
+
+[env.OPENAI_API_KEY]
+required = false
+description = "OpenAI API key. Only needed if stt_model or another model is set to an openai/ model."
+help_url = "https://platform.openai.com/api-keys"
+
+[env.GEMINI_API_KEY]
+required = true
+description = "Google Gemini API key, used by the default chat model and to describe camera images."
+help_url = "https://aistudio.google.com/apikey"
