@@ -33,7 +33,8 @@ def main() -> int:
         return 1
 
     engine = ElevenLabsEngine(voice_id=args.voice_id, speed=args.speed, volume=args.volume)
-    with Speaker(SpeakerConfig(lang=args.lang), engine=engine) as speaker:
+    # Name the device: on the Pi, the ALSA default is often an HDMI output with no speaker.
+    with Speaker(SpeakerConfig(lang=args.lang, device_name_hint="ReSpeaker"), engine=engine) as speaker:
         logger.info("speaking (%s, voice %s): %s", args.lang, args.voice_id, args.text)
         handle = speaker.say(args.text)
         handle.join()
