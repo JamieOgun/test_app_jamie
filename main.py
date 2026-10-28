@@ -1,8 +1,13 @@
 """Talk with an ElevenLabs agent through Palmimo's mic and speaker.
 
 The agent (its voice, prompt, language and LLM) is set up in the ElevenLabs
-dashboard; this app only carries audio. The mic is streamed to the agent over
-its WebSocket, and the agent's voice is streamed to the speaker through aplay.
+dashboard. The mic is streamed to the agent over its WebSocket, and the agent's
+voice is streamed to the speaker through aplay.
+
+The agent can also move the robot: every action in the SDK's toolbox (walk,
+turn, dance, nod, look, show a face, ...) is registered on the agent as a
+client tool when the app starts, and its calls run on the robot here. See
+robot_tools.py.
 
 The mic is muted while the robot is talking. Without a ReSpeaker there is no
 echo cancellation, so the agent would otherwise hear its own voice and
@@ -15,10 +20,12 @@ the app), the app exits, so it never keeps a paid conversation open by itself.
 import argparse
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import os
 import queue
+import shutil
 import signal
 import subprocess
 import sys
@@ -31,6 +38,9 @@ import numpy as np
 import sounddevice as sd
 import websockets
 from palmimo_sdk.io.alsa_devices import resolve_alsa_device
+from palmimo_sdk.robot import Palmimo
+
+from robot_tools import ToolRunner, build_toolset, client_tool_configs, sync_tools
 
 API_KEY_ENV = "ELEVENLABS_API_KEY"
 SIGNED_URL = "https://api.elevenlabs.io/v1/convai/conversation/get-signed-url?agent_id={agent_id}"
@@ -64,17 +74,18 @@ def pcm_rate(audio_format: str) -> int:
     return int(audio_format.removeprefix("pcm_"))
 
 
-def find_input_device(hint: str | None) -> int | None:
-    """Index of the first input device whose name contains *hint*, or None for the default."""
+def find_device(hint: str | None, kind: str = "input") -> int | None:
+    """Index of the first *kind* ("input" or "output") device whose name contains *hint*, or None for the default."""
     if not hint:
         return None
+    channels = f"max_{kind}_channels"
     devices = sd.query_devices()
     for index, device in enumerate(devices):
-        if device["max_input_channels"] > 0 and hint.lower() in device["name"].lower():
-            logger.info("Selected mic %r for hint %r", device["name"], hint)
+        if device[channels] > 0 and hint.lower() in device["name"].lower():
+            logger.info("Selected %s %r for hint %r", kind, device["name"], hint)
             return index
-    names = [d["name"] for d in devices if d["max_input_channels"] > 0]
-    logger.warning("No mic matches hint %r; using the default. Mics found: %s", hint, names)
+    names = [d["name"] for d in devices if d[channels] > 0]
+    logger.warning("No %s device matches hint %r; using the default. Found: %s", kind, hint, names)
     return None
 
 
@@ -144,7 +155,83 @@ class Player:
                 pass  # aplay was restarted by interrupt(); this chunk was meant to be dropped
 
 
-async def converse(args: argparse.Namespace, api_key: str) -> None:
+def open_robot(with_hardware: bool) -> contextlib.AbstractContextManager[Palmimo]:
+    """The robot's legs, neck and face; no speaker or mic, since this app streams audio itself.
+
+    Entering wakes the robot and leaving parks it, even after an error. Without
+    hardware the tools still run, but nothing moves.
+    """
+    if not with_hardware:
+        return contextlib.nullcontext(Palmimo())
+    from palmimo_sdk.io.display import FaceDisplay
+    from palmimo_sdk.io.dynamixel import DynamixelDriver
+
+    return Palmimo(driver=DynamixelDriver(), display=FaceDisplay())
+
+
+class SoundDevicePlayer:
+    """The same interface as Player, through sounddevice, for machines without aplay (such as a Mac)."""
+
+    def __init__(self, device: int | None, rate: int, volume: float) -> None:
+        self._rate = rate
+        self._volume = volume
+        self._buffer = bytearray()
+        self._lock = threading.Lock()
+        self.busy_until = 0.0
+        self._stream = sd.RawOutputStream(
+            samplerate=rate, channels=1, dtype="int16", device=device, callback=self._fill
+        )
+        self._stream.start()
+
+    def _fill(self, out, frames, time_info, status) -> None:  # type: ignore[no-untyped-def]
+        with self._lock:
+            n = min(len(out), len(self._buffer))
+            out[:n] = self._buffer[:n]
+            del self._buffer[:n]
+        out[n:] = b"\x00" * (len(out) - n)
+
+    def play(self, pcm: bytes) -> None:
+        if self._volume != 1.0:
+            samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) * self._volume
+            pcm = np.clip(samples, -32768, 32767).astype("<i2").tobytes()
+        self.busy_until = max(time.monotonic(), self.busy_until) + len(pcm) / 2 / self._rate
+        with self._lock:
+            self._buffer += pcm
+
+    def interrupt(self) -> None:
+        with self._lock:
+            self._buffer.clear()
+        self.busy_until = time.monotonic()
+
+    def close(self) -> None:
+        self._stream.stop()
+        self._stream.close()
+
+
+def open_player(hint: str | None, rate: int, volume: float) -> Player | SoundDevicePlayer:
+    """aplay on the robot (it picks the ALSA card reliably); sounddevice where aplay does not exist."""
+    if shutil.which("aplay"):
+        return Player(resolve_alsa_device(hint, kind="playback", log=logger), rate, volume)
+    return SoundDevicePlayer(find_device(hint, "output"), rate, volume)
+
+
+async def send_context(ws: websockets.ClientConnection, text: str) -> None:
+    """Tell the agent about something that happened around the robot, e.g. "Someone just waved at you."
+
+    The agent takes it into account on its next reply; it is not treated as
+    something the user said and does not make the agent speak by itself.
+    """
+    await ws.send(json.dumps({"type": "contextual_update", "text": text}))
+
+
+async def converse(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
+    toolset = build_toolset(robot)
+    try:
+        await asyncio.to_thread(sync_tools, args.agent_id, api_key, client_tool_configs(toolset))
+    except (RuntimeError, OSError, KeyError) as exc:
+        # The conversation still works without them; the agent just cannot move the robot.
+        logger.warning("could not register the robot's tools on the agent: %s", exc)
+
     url = await asyncio.to_thread(get_signed_url, args.agent_id, api_key)
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
@@ -162,11 +249,10 @@ async def converse(args: argparse.Namespace, api_key: str) -> None:
         in_rate = pcm_rate(meta["user_input_audio_format"])
         logger.info("conversation %s started (voice %d Hz, mic %d Hz)", meta.get("conversation_id"), out_rate, in_rate)
 
-        speaker = resolve_alsa_device(args.speaker_device or None, kind="playback", log=logger)
-        player = Player(speaker, out_rate, args.volume)
+        player = open_player(args.speaker_device or None, out_rate, args.volume)
 
         # Open the mic at its own rate and resample: cheap USB mics often cannot open at 16 kHz.
-        mic_index = find_input_device(args.mic_device or None)
+        mic_index = find_device(args.mic_device or None)
         mic_rate = int(sd.query_devices(mic_index, "input")["default_samplerate"])
         mic_chunks: asyncio.Queue[bytes] = asyncio.Queue()
 
@@ -180,14 +266,22 @@ async def converse(args: argparse.Namespace, api_key: str) -> None:
                     pcm = np.zeros_like(pcm)  # muted while the robot talks
                 await ws.send(json.dumps({"user_audio_chunk": base64.b64encode(pcm.tobytes()).decode()}))
 
+        async def send(event: dict) -> None:
+            await ws.send(json.dumps(event))
+
+        tools = ToolRunner(toolset, send)
+
         async def receive() -> None:
             async for message in ws:
                 event = json.loads(message)
                 kind = event.get("type")
                 if kind == "audio":
                     player.play(base64.b64decode(event["audio_event"]["audio_base_64"]))
+                elif kind == "client_tool_call":
+                    tools.handle(event["client_tool_call"])
                 elif kind == "interruption":
                     player.interrupt()
+                    await tools.interrupt()
                 elif kind == "ping":
                     await ws.send(json.dumps({"type": "pong", "event_id": event["ping_event"]["event_id"]}))
                 elif kind == "user_transcript":
@@ -214,6 +308,7 @@ async def converse(args: argparse.Namespace, api_key: str) -> None:
                     if not task.cancelled() and task.exception() is not None:
                         raise task.exception()  # type: ignore[misc]
         finally:
+            await tools.close()
             player.close()
     logger.info("conversation ended")
 
@@ -224,6 +319,9 @@ def main() -> int:
     parser.add_argument("--speaker-device", default="ReSpeaker", help="Part of the speaker's card name in `aplay -l`")
     parser.add_argument("--mic-device", default="ReSpeaker", help="Part of the mic's name in `arecord -l`")
     parser.add_argument("--volume", type=float, default=1.0, help="Output gain; 1.0 is the voice's own level")
+    parser.add_argument(
+        "--no-robot", action="store_true", help="Run the tools without motors or face display (for testing off the robot)"
+    )
     args = parser.parse_args()
 
     # The Portal's log view shows stdout and stderr as they are.
@@ -234,7 +332,8 @@ def main() -> int:
         logger.error("%s is not set. Add it in the Portal's environment variables screen.", API_KEY_ENV)
         return 1
     try:
-        asyncio.run(converse(args, api_key))
+        with open_robot(not args.no_robot) as robot:
+            asyncio.run(converse(args, api_key, robot))
     except websockets.ConnectionClosed as exc:
         logger.info("conversation closed by ElevenLabs (%s)", exc.rcvd.reason if exc.rcvd else "no reason given")
     except RuntimeError as exc:

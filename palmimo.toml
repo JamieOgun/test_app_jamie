@@ -3,7 +3,7 @@
 
 schema = 1
 name = "elevenlabs-voice"
-description = "Talk with an ElevenLabs agent in real time through Palmimo's mic and speaker. One run is one conversation."
+description = "Talk with an ElevenLabs agent in real time through Palmimo's mic and speaker; the agent can move the robot and change its face. One run is one conversation."
 
 # Run through `uv run` in the app's directory. {param} is replaced with the value set below.
 command = [
@@ -14,14 +14,14 @@ command = [
   "--volume", "{volume}",
 ]
 
-# The mic and speaker are both part of the audio device.
-devices = ["audio"]
+# The mic and speaker are the audio device; the motors and face display are motor_display.
+devices = ["audio", "motor_display"]
 
 # No default: the Portal asks for it before the first run.
 [params.agent_id]
 type = "string"
 pattern = "^[A-Za-z0-9_-]{1,64}$"
-description = "Agent id from the ElevenLabs dashboard (Agents → your agent → it starts with agent_)."
+description = "Agent id from the ElevenLabs dashboard (Agents → your agent → the id in the page URL after /agents/agents/)."
 
 [params.speaker_device]
 type = "string"

@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "numpy>=2",
-    "palmimo-sdk>=0.1.4",
+    "palmimo-sdk[agent,face,hardware]>=0.1.4",
     "sounddevice>=0.5",
     "websockets>=15",
 ]
