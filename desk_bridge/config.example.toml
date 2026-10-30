@@ -1,0 +1,25 @@
+# Copy to config.toml (git-ignored) and edit.
+
+# Where the bridge listens. 0.0.0.0 lets the robot reach it over the LAN.
+host = "0.0.0.0"
+port = 8765
+
+# Shared secret; set the same value as DESK_BRIDGE_TOKEN in the Portal.
+# Make one with: openssl rand -hex 16
+token = "change-me"
+
+# Repo used when a task names none.
+default_repo = "palmimo"
+
+# Stop a task once it has cost this much.
+max_budget_usd = 5.0
+
+# Terminal Claude Code turns shorter than this are not announced (hooks).
+announce_after_secs = 60
+
+# Claude model; leave out to use Claude Code's default.
+# model = "claude-opus-5-5"
+
+# The only repos tasks may run in. Every permission is auto-approved inside them.
+[repos]
+palmimo = "~/Jizai/Palmimo/test_app_jamie"

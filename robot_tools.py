@@ -148,10 +148,12 @@ def _same(existing: Any, wanted: Any) -> bool:
     return existing == wanted
 
 
-def sync_tools(agent_id: str, api_key: str, configs: list[dict[str, Any]]) -> None:
+def sync_tools(
+    agent_id: str, api_key: str, configs: list[dict[str, Any]], prompt_lines: tuple[str, ...] = PROMPT_LINES
+) -> None:
     """Make sure every config exists as a workspace tool, is current, and is attached to the agent.
 
-    Also appends any missing PROMPT_LINES to the agent's prompt, enables
+    Also appends any missing *prompt_lines* to the agent's prompt, enables
     skip_turn, and applies TURN_SETTINGS.
     """
     existing = {
@@ -176,7 +178,7 @@ def sync_tools(agent_id: str, api_key: str, configs: list[dict[str, Any]]) -> No
     attached = prompt.get("tool_ids") or []
     missing = [tool_id for tool_id in tool_ids if tool_id not in attached]
     text = prompt.get("prompt") or ""
-    new_lines = [line for line in PROMPT_LINES if line not in text]
+    new_lines = [line for line in prompt_lines if line not in text]
     built_in = prompt.get("built_in_tools") or {}
     needs_skip = not built_in.get("skip_turn")
     turn = config.get("turn") or {}
@@ -213,9 +215,11 @@ def sync_tools(agent_id: str, api_key: str, configs: list[dict[str, Any]]) -> No
 class ToolRunner:
     """Runs the agent's tool calls on the robot, one at a time, and reports each result."""
 
-    def __init__(self, toolset: AgentToolSet, send: Any) -> None:
+    def __init__(self, toolset: AgentToolSet, send: Any, handlers: dict[str, Any] | None = None) -> None:
         self._toolset = toolset
         self._send = send  # async callable taking one JSON-able dict
+        #: Tools answered here instead of on the robot: name -> async (args) -> (text, is_error).
+        self._handlers = handlers or {}
         self._tasks: set[asyncio.Task[None]] = set()
         #: Set when the agent calls go_to_sleep.
         self.sleep_requested = asyncio.Event()
@@ -240,6 +244,8 @@ class ToolRunner:
         if name == GO_TO_SLEEP["name"]:
             text, is_error = "going to sleep", False
             self.sleep_requested.set()
+        elif name in self._handlers:
+            text, is_error = await self._handlers[name](args)
         else:
             # AgentToolSet.call never raises for a bad call; it returns an error the agent can read.
             result = await self._toolset.call(name, args)

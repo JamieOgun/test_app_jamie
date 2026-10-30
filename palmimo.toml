@@ -3,7 +3,7 @@
 
 schema = 1
 name = "elevenlabs-voice"
-description = "Call Palmimo by name to talk with an ElevenLabs agent in real time; the agent can move the robot and change its face. Goes back to sleep when told to or after a quiet spell, and runs until stopped."
+description = "Call Palmimo by name to talk with an ElevenLabs agent that moves the robot and can run coding tasks with Claude Code on your laptop. Sleeps when told to or after a quiet spell."
 
 # Run through `uv run` in the app's directory. {param} is replaced with the value set below.
 command = [
@@ -15,6 +15,7 @@ command = [
   "--idle-timeout-secs", "{idle_timeout_secs}",
   "--max-session-secs", "{max_session_secs}",
   "--stt-model", "{stt_model}",
+  "--desk-bridge-url", "{desk_bridge_url}",
 ]
 
 # The mic and speaker are the audio device; the motors and face display are motor_display.
@@ -67,6 +68,13 @@ default = "gpt-4o-mini-transcribe"
 pattern = "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
 description = "OpenAI model that transcribes speech near the robot to hear its name."
 
+[params.desk_bridge_url]
+type = "string"
+default = ""
+pattern = "^(https?://[A-Za-z0-9.:_-]{1,120}/?)?$"
+max_length = 128
+description = "Desk bridge on your laptop for coding tasks with Claude Code, e.g. http://192.168.11.34:8765 (see desk_bridge/README.md). Leave empty to turn coding off."
+
 [env.ELEVENLABS_API_KEY]
 required = true
 description = "ElevenLabs API key, used to start conversations with the agent."
@@ -76,3 +84,7 @@ help_url = "https://elevenlabs.io/app/settings/api-keys"
 required = true
 description = "OpenAI API key, used to transcribe speech near the robot and check whether it was called by name. Nothing reaches ElevenLabs until it is."
 help_url = "https://platform.openai.com/api-keys"
+
+[env.DESK_BRIDGE_TOKEN]
+required = false
+description = "The token from the desk bridge's config.toml on your laptop. Only needed when desk_bridge_url is set."

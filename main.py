@@ -17,6 +17,11 @@ turn, dance, nod, look, show a face, ...) is registered on the agent as a
 client tool when the app starts, and its calls run on the robot here. See
 robot_tools.py.
 
+With ``--desk-bridge-url`` set, the agent can also run coding tasks with
+Claude Code on your laptop, through the desk bridge in desk_bridge/. When a
+task finishes, or a Claude Code session in your terminal needs you, the robot
+wakes by itself (if asleep) and the agent says so. See coding_tools.py.
+
 The mic is muted while the robot is talking. Without a ReSpeaker there is no
 echo cancellation, so the agent would otherwise hear its own voice and
 interrupt itself. The cost is that you cannot talk over it.
@@ -49,12 +54,15 @@ from palmimo_sdk.agent import AgentToolSet
 from palmimo_sdk.io.alsa_devices import resolve_alsa_device
 from palmimo_sdk.robot import Palmimo
 
-from robot_tools import ToolRunner, build_toolset, client_tool_configs, sync_tools
+import coding_tools
+from coding_tools import Announcement, DeskBridge
+from robot_tools import PROMPT_LINES, ToolRunner, build_toolset, client_tool_configs, sync_tools
 from wake import SAMPLE_RATE as WAKE_RATE
 from wake import NameWakeDetector, WakeDetector, WakeEvent
 
 API_KEY_ENV = "ELEVENLABS_API_KEY"
 OPENAI_KEY_ENV = "OPENAI_API_KEY"
+DESK_TOKEN_ENV = "DESK_BRIDGE_TOKEN"
 SIGNED_URL = "https://api.elevenlabs.io/v1/convai/conversation/get-signed-url?agent_id={agent_id}"
 
 #: Mic chunk length sent to the agent.
@@ -279,11 +287,17 @@ def drain(chunks: asyncio.Queue[bytes]) -> None:
         chunks.get_nowait()
 
 
-async def listen_for_name(
-    detector: WakeDetector, mic_chunks: asyncio.Queue[bytes], mic_rate: int, stop: asyncio.Event
-) -> WakeEvent | None:
-    """Feed the mic to *detector* until it hears the robot's name; None when the app is stopping."""
+async def wait_for_wake(
+    detector: WakeDetector,
+    mic_chunks: asyncio.Queue[bytes],
+    mic_rate: int,
+    announcements: asyncio.Queue[Announcement],
+    stop: asyncio.Event,
+) -> WakeEvent | Announcement | None:
+    """Feed the mic to *detector* until it hears the robot's name or the laptop has news; None when stopping."""
     while not stop.is_set():
+        if not announcements.empty():
+            return announcements.get_nowait()
         try:
             raw = await asyncio.wait_for(mic_chunks.get(), timeout=0.5)
         except TimeoutError:
@@ -300,10 +314,17 @@ async def conversation(
     toolset: AgentToolSet,
     mic_chunks: asyncio.Queue[bytes],
     mic_rate: int,
-    first_text: str,
+    woken: WakeEvent | Announcement,
+    handlers: dict[str, coding_tools.Handler],
+    announcements: asyncio.Queue[Announcement],
     stop: asyncio.Event,
 ) -> str:
-    """One ElevenLabs conversation, from wake to sleep. Returns why it ended."""
+    """One ElevenLabs conversation, from wake to sleep. Returns why it ended.
+
+    *woken* is what started it: the name (maybe with a command said in the
+    same breath) or news from the laptop. Further news from the laptop is
+    passed on while it runs.
+    """
     url = await asyncio.to_thread(get_signed_url, args.agent_id, api_key)
     async with websockets.connect(url, max_size=None) as ws:
         await ws.send(json.dumps({"type": "conversation_initiation_client_data"}))
@@ -321,13 +342,25 @@ async def conversation(
         async def send(event: dict) -> None:
             await ws.send(json.dumps(event))
 
-        tools = ToolRunner(toolset, send)
+        tools = ToolRunner(toolset, send, handlers)
         started = last_heard = last_audio = time.monotonic()
 
-        if first_text:
+        async def announce(news: Announcement) -> None:
+            nonlocal last_heard
+            last_heard = time.monotonic()
+            logger.info("laptop: %s in %s: %s", news.kind, news.repo, news.text[:120])
+            await send({"type": "user_message", "text": news.message()})
+
+        if isinstance(woken, Announcement):
+            await announce(woken)
+        elif woken.command:
             # Said in the same breath as the name: answer it straight away.
-            logger.info("you: %s", first_text)
-            await send({"type": "user_message", "text": first_text})
+            logger.info("you: %s", woken.command)
+            await send({"type": "user_message", "text": woken.command})
+
+        async def forward_announcements() -> None:
+            while True:
+                await announce(await announcements.get())
 
         async def send_mic() -> None:
             while True:
@@ -377,7 +410,7 @@ async def conversation(
                     return f"idle for {args.idle_timeout_secs:g}s"
 
         logger.info("listening; start talking")
-        tasks = {asyncio.create_task(t) for t in (send_mic(), receive(), watch(), stop.wait())}
+        tasks = {asyncio.create_task(t) for t in (send_mic(), receive(), watch(), forward_announcements(), stop.wait())}
         try:
             done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
             task = done.pop()
@@ -399,8 +432,22 @@ async def conversation(
 async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
     """Sleep until someone calls the robot's name, talk, go back to sleep; repeat until stopped."""
     toolset = build_toolset(robot)
+    configs = client_tool_configs(toolset)
+    prompt_lines = PROMPT_LINES
+    announcements: asyncio.Queue[Announcement] = asyncio.Queue()
+    handlers: dict[str, coding_tools.Handler] = {}
+    bridge: DeskBridge | None = None
+    watcher: asyncio.Task[None] | None = None
+    if args.desk_bridge_url:
+        bridge = DeskBridge(args.desk_bridge_url, os.environ.get(DESK_TOKEN_ENV, ""))
+        repos, last_event = await coding_tools.list_repos(bridge)
+        logger.info("coding tasks go to %s (repos: %s)", args.desk_bridge_url, ", ".join(repos) or "unknown yet")
+        configs += coding_tools.tool_configs(repos)
+        prompt_lines = PROMPT_LINES + coding_tools.PROMPT_LINES
+        handlers = coding_tools.handlers(bridge)
+        watcher = asyncio.create_task(coding_tools.watch_events(bridge, announcements, last_event))
     try:
-        await asyncio.to_thread(sync_tools, args.agent_id, api_key, client_tool_configs(toolset))
+        await asyncio.to_thread(sync_tools, args.agent_id, api_key, configs, prompt_lines)
     except (RuntimeError, OSError, KeyError) as exc:
         # The conversation still works without them; the agent just cannot move the robot.
         logger.warning("could not register the robot's tools on the agent: %s", exc)
@@ -434,20 +481,28 @@ async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
         while not stop.is_set():
             await show_face(robot, "SLEEP")
             logger.info("asleep; call me by name (Palmimo / パルミーモ)")
-            woken = await listen_for_name(detector, mic_chunks, mic_rate, stop)
+            woken = await wait_for_wake(detector, mic_chunks, mic_rate, announcements, stop)
             if woken is None:
                 break
+            if isinstance(woken, Announcement):
+                logger.info("waking up for news from the laptop")
             await show_face(robot, None)
             await play_chime(args)
             drain(mic_chunks)  # don't send the chime itself to the agent
             try:
-                reason = await conversation(args, api_key, toolset, mic_chunks, mic_rate, woken.command, stop)
+                reason = await conversation(
+                    args, api_key, toolset, mic_chunks, mic_rate, woken, handlers, announcements, stop
+                )
             except (RuntimeError, OSError, websockets.WebSocketException) as exc:
                 logger.warning("could not talk to ElevenLabs: %s", exc)
                 reason = "error"
             logger.info("conversation ended (%s)", reason)
             detector.reset()
             drain(mic_chunks)
+    if watcher is not None:
+        watcher.cancel()
+    if bridge is not None:
+        await bridge.close()
     logger.info("stopped")
 
 
@@ -465,6 +520,9 @@ def main() -> int:
         "--stt-model", default="gpt-4o-mini-transcribe", help="OpenAI model that transcribes speech to hear the name"
     )
     parser.add_argument(
+        "--desk-bridge-url", default="", help="Desk bridge on your laptop, e.g. http://192.168.1.20:8765; empty for off"
+    )
+    parser.add_argument(
         "--no-robot", action="store_true", help="Run the tools without motors or face display (for testing off the robot)"
     )
     args = parser.parse_args()
@@ -479,6 +537,9 @@ def main() -> int:
         return 1
     if not os.environ.get(OPENAI_KEY_ENV):
         logger.error("%s is not set. Add it in the Portal's environment variables screen.", OPENAI_KEY_ENV)
+        return 1
+    if args.desk_bridge_url and not os.environ.get(DESK_TOKEN_ENV):
+        logger.error("%s is not set but a desk bridge is. Add the bridge's token in the Portal.", DESK_TOKEN_ENV)
         return 1
     try:
         with open_robot(not args.no_robot) as robot:
