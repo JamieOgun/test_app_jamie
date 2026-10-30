@@ -4,10 +4,14 @@ The tools come from the SDK's AgentToolSet, the same toolbox the devkit's
 companion agent uses. Two parts:
 
 - ``sync_tools`` registers every tool in the ElevenLabs workspace, attaches
-  it to the agent, and adds ``BODY_PROMPT`` to the agent's prompt, so the
-  agent's LLM knows it can move. Nothing is changed when it is already current.
+  it to the agent, adds ``PROMPT_LINES`` to the agent's prompt, and makes the
+  agent quiet when nobody is talking to it (``TURN_SETTINGS`` and the
+  ``skip_turn`` system tool), and clears the agent's first message, since
+  the robot is woken by name and should just listen. Nothing is changed when
+  it is already current.
 - ``ToolRunner`` answers the agent's ``client_tool_call`` events by running the
-  tool on the robot and sending back a ``client_tool_result``.
+  tool on the robot and sending back a ``client_tool_result``. ``go_to_sleep``
+  is handled here rather than on the robot: it ends the conversation.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 import urllib.error
 import urllib.request
 from typing import Any
@@ -35,8 +40,43 @@ RESPONSE_TIMEOUT_SECS = 25
 
 API = "https://api.elevenlabs.io/v1/convai"
 
-#: Added to the end of the agent's prompt (once), so it uses the tools while it talks.
-BODY_PROMPT = "You have a robot body; use your tools to move and show feelings while you talk."
+#: Added to the end of the agent's prompt (each once). The first makes it use
+#: the tools while it talks; the rest keep it from talking when nobody needs it.
+PROMPT_LINES = (
+    "You have a robot body; use your tools to move and show feelings while you talk.",
+    "Keep replies short: one or two sentences, and only ask a question when you need the answer.",
+    (
+        "You sit in a room where people also talk to each other. If speech is not meant for you, "
+        "the user goes quiet, or there is nothing useful to add, call skip_turn and stay silent. "
+        "Never ask whether the user is still there."
+    ),
+    (
+        "People wake you by calling your name, Palmimo (パルミーモ); reply in the language they use. "
+        "When they say goodbye or ask you to sleep, say a short goodbye and call go_to_sleep."
+    ),
+)
+
+#: Ends the conversation and puts the robot back to listening for its name.
+#: Answered by ToolRunner itself, not by the SDK toolbox.
+GO_TO_SLEEP = {
+    "type": "client",
+    "name": "go_to_sleep",
+    "description": (
+        "Go back to sleep and stop listening until someone calls your name again. Call it when the user "
+        "says goodbye, asks you to sleep or stop listening, or says that's all. Say a short goodbye first. "
+        "Do not call it for pauses, silence, or when you are unsure."
+    ),
+    "expects_response": True,
+    "response_timeout_secs": 5,
+}
+
+#: ElevenLabs re-engages the user after ``turn_timeout`` seconds of silence
+#: (default 7). 30 is the longest it allows; skip_turn covers the rest.
+TURN_SETTINGS = {"turn_timeout": 30, "turn_eagerness": "patient"}
+
+#: The system tool that lets the agent pass a turn without speaking. With no
+#: wait timeout it then stays silent until someone speaks.
+SKIP_TURN = {"type": "system", "name": "skip_turn", "description": "", "params": {"system_tool_type": "skip_turn"}}
 
 logger = logging.getLogger("robot_tools")
 
@@ -85,6 +125,7 @@ def client_tool_configs(toolset: AgentToolSet) -> list[dict[str, Any]]:
                 "required": [key for key in schema.get("required", []) if key in properties],
             }
         configs.append(config)
+    configs.append(GO_TO_SLEEP)
     return configs
 
 
@@ -110,7 +151,8 @@ def _same(existing: Any, wanted: Any) -> bool:
 def sync_tools(agent_id: str, api_key: str, configs: list[dict[str, Any]]) -> None:
     """Make sure every config exists as a workspace tool, is current, and is attached to the agent.
 
-    Also appends BODY_PROMPT to the agent's prompt if it is not there yet.
+    Also appends any missing PROMPT_LINES to the agent's prompt, enables
+    skip_turn, and applies TURN_SETTINGS.
     """
     existing = {
         tool["tool_config"]["name"]: tool
@@ -129,23 +171,43 @@ def sync_tools(agent_id: str, api_key: str, configs: list[dict[str, Any]]) -> No
         tool_ids.append(tool["id"])
 
     agent = _request("GET", f"/agents/{agent_id}", api_key)
-    prompt = agent["conversation_config"]["agent"]["prompt"]
+    config = agent["conversation_config"]
+    prompt = config["agent"]["prompt"]
     attached = prompt.get("tool_ids") or []
     missing = [tool_id for tool_id in tool_ids if tool_id not in attached]
     text = prompt.get("prompt") or ""
-    needs_line = BODY_PROMPT not in text
-    if not missing and not needs_line:
+    new_lines = [line for line in PROMPT_LINES if line not in text]
+    built_in = prompt.get("built_in_tools") or {}
+    needs_skip = not built_in.get("skip_turn")
+    turn = config.get("turn") or {}
+    needs_turn = not _same(turn, TURN_SETTINGS)
+    needs_quiet_start = bool(config["agent"].get("first_message"))
+    if not missing and not new_lines and not needs_skip and not needs_turn and not needs_quiet_start:
         logger.info("agent is up to date: %d robot tools attached", len(tool_ids))
         return
-    # Send the whole prompt back with only these fields changed, so nothing
-    # else on the agent is reset. The deprecated inline `tools` list cannot be
-    # sent together with tool_ids.
+    # Send the whole prompt and turn config back with only these fields
+    # changed, so nothing else on the agent is reset. The deprecated inline
+    # `tools` list cannot be sent together with tool_ids.
     prompt = {key: value for key, value in prompt.items() if key != "tools"}
     prompt["tool_ids"] = attached + missing
-    if needs_line:
-        prompt["prompt"] = f"{text.rstrip()}\n\n{BODY_PROMPT}" if text.strip() else BODY_PROMPT
-    _request("PATCH", f"/agents/{agent_id}", api_key, {"conversation_config": {"agent": {"prompt": prompt}}})
-    logger.info("updated the agent: %d tools attached, body prompt %s", len(missing), "added" if needs_line else "present")
+    if new_lines:
+        prompt["prompt"] = "\n\n".join([text.rstrip(), *new_lines]) if text.strip() else "\n\n".join(new_lines)
+    if needs_skip:
+        prompt["built_in_tools"] = {**built_in, "skip_turn": SKIP_TURN}
+    body: dict[str, Any] = {"agent": {"prompt": prompt}}
+    if needs_quiet_start:
+        body["agent"]["first_message"] = ""
+    if needs_turn:
+        body["turn"] = {**turn, **TURN_SETTINGS}
+    _request("PATCH", f"/agents/{agent_id}", api_key, {"conversation_config": body})
+    logger.info(
+        "updated the agent: %d tools attached, %d prompt lines added, skip_turn %s, turn settings %s, first message %s",
+        len(missing),
+        len(new_lines),
+        "enabled" if needs_skip else "present",
+        "updated" if needs_turn else "current",
+        "cleared" if needs_quiet_start else "already empty",
+    )
 
 
 class ToolRunner:
@@ -155,6 +217,15 @@ class ToolRunner:
         self._toolset = toolset
         self._send = send  # async callable taking one JSON-able dict
         self._tasks: set[asyncio.Task[None]] = set()
+        #: Set when the agent calls go_to_sleep.
+        self.sleep_requested = asyncio.Event()
+        #: When the last tool finished (time.monotonic()); 0 before any.
+        self.last_finished = 0.0
+
+    @property
+    def busy(self) -> bool:
+        """Whether a tool is still running (a long dance should not count as silence)."""
+        return bool(self._tasks)
 
     def handle(self, call: dict[str, Any]) -> None:
         """Start one ``client_tool_call`` in the background, so audio keeps flowing while the robot moves."""
@@ -166,15 +237,21 @@ class ToolRunner:
         name = call.get("tool_name", "")
         args = {key: value for key, value in (call.get("parameters") or {}).items() if key not in HIDDEN_ARGS}
         logger.info("tool %s(%s)", name, json.dumps(args))
-        # AgentToolSet.call never raises for a bad call; it returns an error the agent can read.
-        result = await self._toolset.call(name, args)
-        logger.info("  -> %s", result.text[:120])
+        if name == GO_TO_SLEEP["name"]:
+            text, is_error = "going to sleep", False
+            self.sleep_requested.set()
+        else:
+            # AgentToolSet.call never raises for a bad call; it returns an error the agent can read.
+            result = await self._toolset.call(name, args)
+            text, is_error = result.text, result.is_error
+        logger.info("  -> %s", text[:120])
+        self.last_finished = time.monotonic()
         await self._send(
             {
                 "type": "client_tool_result",
                 "tool_call_id": call["tool_call_id"],
-                "result": result.text,
-                "is_error": result.is_error,
+                "result": text,
+                "is_error": is_error,
             }
         )
 

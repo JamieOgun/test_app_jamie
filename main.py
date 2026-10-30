@@ -1,4 +1,12 @@
-"""Talk with an ElevenLabs agent through Palmimo's mic and speaker.
+"""Talk with an ElevenLabs agent through Palmimo's mic and speaker, woken by name.
+
+The robot sleeps until someone calls it "Palmimo" (パルミーモ); see wake.py
+for how the name is heard. It then plays a chime and opens a conversation. If
+something was said in the same breath ("Palmimo, dance"), that is sent to the
+agent straight away. The conversation ends, and the robot goes back to
+listening for its name, when the agent calls ``go_to_sleep``, after
+``--idle-timeout-secs`` without activity, or at ``--max-session-secs``. So no
+paid conversation stays open while nobody is talking to it.
 
 The agent (its voice, prompt, language and LLM) is set up in the ElevenLabs
 dashboard. The mic is streamed to the agent over its WebSocket, and the agent's
@@ -13,8 +21,7 @@ The mic is muted while the robot is talking. Without a ReSpeaker there is no
 echo cancellation, so the agent would otherwise hear its own voice and
 interrupt itself. The cost is that you cannot talk over it.
 
-One run is one conversation. When the agent ends the call (or the Portal stops
-the app), the app exits, so it never keeps a paid conversation open by itself.
+The app runs until the Portal stops it.
 """
 
 import argparse
@@ -37,12 +44,17 @@ import urllib.request
 import numpy as np
 import sounddevice as sd
 import websockets
+from openai import OpenAI
+from palmimo_sdk.agent import AgentToolSet
 from palmimo_sdk.io.alsa_devices import resolve_alsa_device
 from palmimo_sdk.robot import Palmimo
 
 from robot_tools import ToolRunner, build_toolset, client_tool_configs, sync_tools
+from wake import SAMPLE_RATE as WAKE_RATE
+from wake import NameWakeDetector, WakeDetector, WakeEvent
 
 API_KEY_ENV = "ELEVENLABS_API_KEY"
+OPENAI_KEY_ENV = "OPENAI_API_KEY"
 SIGNED_URL = "https://api.elevenlabs.io/v1/convai/conversation/get-signed-url?agent_id={agent_id}"
 
 #: Mic chunk length sent to the agent.
@@ -50,6 +62,11 @@ CHUNK_SECONDS = 0.05
 #: Keep the mic muted this long after the robot's last sample, to cover the
 #: speaker's own buffering and room echo.
 MUTE_TAIL_SECONDS = 0.4
+#: The wake chime: two notes of this length, at this rate.
+CHIME_NOTE_SECONDS = 0.09
+CHIME_RATE = 16000
+#: After go_to_sleep, wait at most this long for the goodbye to finish playing.
+SLEEP_GOODBYE_MAX_SECONDS = 8.0
 
 logger = logging.getLogger("elevenlabs_agent")
 
@@ -224,20 +241,70 @@ async def send_context(ws: websockets.ClientConnection, text: str) -> None:
     await ws.send(json.dumps({"type": "contextual_update", "text": text}))
 
 
-async def converse(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
-    toolset = build_toolset(robot)
+def chime(rate: int) -> bytes:
+    """Two short rising notes, played the moment the robot hears its name."""
+    notes = []
+    for freq in (880.0, 1320.0):
+        t = np.arange(int(rate * CHIME_NOTE_SECONDS)) / rate
+        fade = np.minimum(1.0, np.minimum(t, t[::-1]) / 0.01)  # 10 ms fades, no clicks
+        notes.append(0.3 * np.sin(2 * np.pi * freq * t) * fade)
+    return (np.concatenate(notes) * 32767).astype("<i2").tobytes()
+
+
+async def play_chime(args: argparse.Namespace) -> None:
+    player = open_player(args.speaker_device or None, CHIME_RATE, args.volume)
     try:
-        await asyncio.to_thread(sync_tools, args.agent_id, api_key, client_tool_configs(toolset))
-    except (RuntimeError, OSError, KeyError) as exc:
-        # The conversation still works without them; the agent just cannot move the robot.
-        logger.warning("could not register the robot's tools on the agent: %s", exc)
+        player.play(chime(CHIME_RATE))
+        await asyncio.sleep(max(0.0, player.busy_until - time.monotonic()) + 0.15)
+    finally:
+        player.close()
 
+
+async def show_face(robot: Palmimo, expression: str | None) -> None:
+    """Show *expression* on the face display, or the neutral face for None; skipped without a display."""
+    display = robot.display
+    if display is None or not display.is_connected:
+        return
+    try:
+        if expression is None:
+            await asyncio.to_thread(display.idle)
+        else:
+            await asyncio.to_thread(display.set_expression, expression)
+    except Exception as exc:  # noqa: BLE001 --  # the face is decoration; never let it stop the voice
+        logger.warning("could not change the face: %s", exc)
+
+
+def drain(chunks: asyncio.Queue[bytes]) -> None:
+    while not chunks.empty():
+        chunks.get_nowait()
+
+
+async def listen_for_name(
+    detector: WakeDetector, mic_chunks: asyncio.Queue[bytes], mic_rate: int, stop: asyncio.Event
+) -> WakeEvent | None:
+    """Feed the mic to *detector* until it hears the robot's name; None when the app is stopping."""
+    while not stop.is_set():
+        try:
+            raw = await asyncio.wait_for(mic_chunks.get(), timeout=0.5)
+        except TimeoutError:
+            continue
+        event = await detector.feed(resample(raw, mic_rate, WAKE_RATE))
+        if event is not None:
+            return event
+    return None
+
+
+async def conversation(
+    args: argparse.Namespace,
+    api_key: str,
+    toolset: AgentToolSet,
+    mic_chunks: asyncio.Queue[bytes],
+    mic_rate: int,
+    first_text: str,
+    stop: asyncio.Event,
+) -> str:
+    """One ElevenLabs conversation, from wake to sleep. Returns why it ended."""
     url = await asyncio.to_thread(get_signed_url, args.agent_id, api_key)
-    loop = asyncio.get_running_loop()
-    stop = asyncio.Event()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, stop.set)
-
     async with websockets.connect(url, max_size=None) as ws:
         await ws.send(json.dumps({"type": "conversation_initiation_client_data"}))
         while True:
@@ -251,31 +318,31 @@ async def converse(args: argparse.Namespace, api_key: str, robot: Palmimo) -> No
 
         player = open_player(args.speaker_device or None, out_rate, args.volume)
 
-        # Open the mic at its own rate and resample: cheap USB mics often cannot open at 16 kHz.
-        mic_index = find_device(args.mic_device or None)
-        mic_rate = int(sd.query_devices(mic_index, "input")["default_samplerate"])
-        mic_chunks: asyncio.Queue[bytes] = asyncio.Queue()
+        async def send(event: dict) -> None:
+            await ws.send(json.dumps(event))
 
-        def on_mic(data, frames, time_info, status) -> None:  # type: ignore[no-untyped-def]
-            loop.call_soon_threadsafe(mic_chunks.put_nowait, bytes(data))
+        tools = ToolRunner(toolset, send)
+        started = last_heard = last_audio = time.monotonic()
+
+        if first_text:
+            # Said in the same breath as the name: answer it straight away.
+            logger.info("you: %s", first_text)
+            await send({"type": "user_message", "text": first_text})
 
         async def send_mic() -> None:
             while True:
                 pcm = resample(await mic_chunks.get(), mic_rate, in_rate)
                 if time.monotonic() < player.busy_until + MUTE_TAIL_SECONDS:
                     pcm = np.zeros_like(pcm)  # muted while the robot talks
-                await ws.send(json.dumps({"user_audio_chunk": base64.b64encode(pcm.tobytes()).decode()}))
+                await send({"user_audio_chunk": base64.b64encode(pcm.tobytes()).decode()})
 
-        async def send(event: dict) -> None:
-            await ws.send(json.dumps(event))
-
-        tools = ToolRunner(toolset, send)
-
-        async def receive() -> None:
+        async def receive() -> str:
+            nonlocal last_heard, last_audio
             async for message in ws:
                 event = json.loads(message)
                 kind = event.get("type")
                 if kind == "audio":
+                    last_audio = time.monotonic()
                     player.play(base64.b64decode(event["audio_event"]["audio_base_64"]))
                 elif kind == "client_tool_call":
                     tools.handle(event["client_tool_call"])
@@ -283,34 +350,105 @@ async def converse(args: argparse.Namespace, api_key: str, robot: Palmimo) -> No
                     player.interrupt()
                     await tools.interrupt()
                 elif kind == "ping":
-                    await ws.send(json.dumps({"type": "pong", "event_id": event["ping_event"]["event_id"]}))
+                    await send({"type": "pong", "event_id": event["ping_event"]["event_id"]})
                 elif kind == "user_transcript":
+                    last_heard = time.monotonic()
                     logger.info("you: %s", event["user_transcription_event"]["user_transcript"])
                 elif kind == "agent_response":
                     logger.info("agent: %s", event["agent_response_event"]["agent_response"])
+            return "closed by ElevenLabs"
 
-        mic = sd.RawInputStream(
-            samplerate=mic_rate,
-            channels=1,
-            dtype="int16",
-            blocksize=int(mic_rate * CHUNK_SECONDS),
-            device=mic_index,
-            callback=on_mic,
-        )
+        async def watch() -> str:
+            """Decide when to go back to sleep."""
+            sleep_asked = 0.0
+            while True:
+                await asyncio.sleep(0.25)
+                now = time.monotonic()
+                if tools.sleep_requested.is_set():
+                    sleep_asked = sleep_asked or now
+                    # Let the goodbye finish: no new audio for a moment and nothing left to play.
+                    goodbye_done = now > max(player.busy_until + 0.3, last_audio + 1.0)
+                    if goodbye_done or now - sleep_asked > SLEEP_GOODBYE_MAX_SECONDS:
+                        return "asked to sleep"
+                if now - started > args.max_session_secs:
+                    return f"session cap of {args.max_session_secs:g}s"
+                last_activity = max(last_heard, player.busy_until, tools.last_finished)
+                if not tools.busy and now - last_activity > args.idle_timeout_secs:
+                    return f"idle for {args.idle_timeout_secs:g}s"
+
+        logger.info("listening; start talking")
+        tasks = {asyncio.create_task(t) for t in (send_mic(), receive(), watch(), stop.wait())}
         try:
-            with mic:
-                logger.info("listening; start talking")
-                tasks = [asyncio.create_task(t) for t in (send_mic(), receive(), stop.wait())]
-                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                for task in pending:
-                    task.cancel()
-                for task in done:
-                    if not task.cancelled() and task.exception() is not None:
-                        raise task.exception()  # type: ignore[misc]
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            task = done.pop()
+            if task.exception() is not None:
+                exc = task.exception()
+                if isinstance(exc, websockets.ConnectionClosed):
+                    return "closed by ElevenLabs"
+                raise exc  # type: ignore[misc]
+            result = task.result()
+            return result if isinstance(result, str) else "app stopping"
         finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             await tools.close()
             player.close()
-    logger.info("conversation ended")
+
+
+async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
+    """Sleep until someone calls the robot's name, talk, go back to sleep; repeat until stopped."""
+    toolset = build_toolset(robot)
+    try:
+        await asyncio.to_thread(sync_tools, args.agent_id, api_key, client_tool_configs(toolset))
+    except (RuntimeError, OSError, KeyError) as exc:
+        # The conversation still works without them; the agent just cannot move the robot.
+        logger.warning("could not register the robot's tools on the agent: %s", exc)
+
+    # Loads (and on first run downloads) the speech detector.
+    detector: WakeDetector = await asyncio.to_thread(NameWakeDetector, OpenAI(), args.stt_model)
+
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, stop.set)
+
+    # One mic stream for the whole run, at its own rate (cheap USB mics often
+    # cannot open at 16 kHz); each consumer resamples what it needs.
+    mic_index = find_device(args.mic_device or None)
+    mic_rate = int(sd.query_devices(mic_index, "input")["default_samplerate"])
+    mic_chunks: asyncio.Queue[bytes] = asyncio.Queue()
+
+    def on_mic(data, frames, time_info, status) -> None:  # type: ignore[no-untyped-def]
+        loop.call_soon_threadsafe(mic_chunks.put_nowait, bytes(data))
+
+    mic = sd.RawInputStream(
+        samplerate=mic_rate,
+        channels=1,
+        dtype="int16",
+        blocksize=int(mic_rate * CHUNK_SECONDS),
+        device=mic_index,
+        callback=on_mic,
+    )
+    with mic:
+        while not stop.is_set():
+            await show_face(robot, "SLEEP")
+            logger.info("asleep; call me by name (Palmimo / パルミーモ)")
+            woken = await listen_for_name(detector, mic_chunks, mic_rate, stop)
+            if woken is None:
+                break
+            await show_face(robot, None)
+            await play_chime(args)
+            drain(mic_chunks)  # don't send the chime itself to the agent
+            try:
+                reason = await conversation(args, api_key, toolset, mic_chunks, mic_rate, woken.command, stop)
+            except (RuntimeError, OSError, websockets.WebSocketException) as exc:
+                logger.warning("could not talk to ElevenLabs: %s", exc)
+                reason = "error"
+            logger.info("conversation ended (%s)", reason)
+            detector.reset()
+            drain(mic_chunks)
+    logger.info("stopped")
 
 
 def main() -> int:
@@ -320,22 +458,31 @@ def main() -> int:
     parser.add_argument("--mic-device", default="ReSpeaker", help="Part of the mic's name in `arecord -l`")
     parser.add_argument("--volume", type=float, default=1.0, help="Output gain; 1.0 is the voice's own level")
     parser.add_argument(
+        "--idle-timeout-secs", type=float, default=25.0, help="Go back to sleep after this long without activity"
+    )
+    parser.add_argument("--max-session-secs", type=float, default=600.0, help="Longest one conversation may run")
+    parser.add_argument(
+        "--stt-model", default="gpt-4o-mini-transcribe", help="OpenAI model that transcribes speech to hear the name"
+    )
+    parser.add_argument(
         "--no-robot", action="store_true", help="Run the tools without motors or face display (for testing off the robot)"
     )
     args = parser.parse_args()
 
     # The Portal's log view shows stdout and stderr as they are.
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per transcription otherwise
 
     api_key = os.environ.get(API_KEY_ENV)
     if not api_key:
         logger.error("%s is not set. Add it in the Portal's environment variables screen.", API_KEY_ENV)
         return 1
+    if not os.environ.get(OPENAI_KEY_ENV):
+        logger.error("%s is not set. Add it in the Portal's environment variables screen.", OPENAI_KEY_ENV)
+        return 1
     try:
         with open_robot(not args.no_robot) as robot:
-            asyncio.run(converse(args, api_key, robot))
-    except websockets.ConnectionClosed as exc:
-        logger.info("conversation closed by ElevenLabs (%s)", exc.rcvd.reason if exc.rcvd else "no reason given")
+            asyncio.run(run(args, api_key, robot))
     except RuntimeError as exc:
         logger.error("%s", exc)
         return 1

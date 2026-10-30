@@ -3,7 +3,7 @@
 
 schema = 1
 name = "elevenlabs-voice"
-description = "Talk with an ElevenLabs agent in real time through Palmimo's mic and speaker; the agent can move the robot and change its face. One run is one conversation."
+description = "Call Palmimo by name to talk with an ElevenLabs agent in real time; the agent can move the robot and change its face. Goes back to sleep when told to or after a quiet spell, and runs until stopped."
 
 # Run through `uv run` in the app's directory. {param} is replaced with the value set below.
 command = [
@@ -12,6 +12,9 @@ command = [
   "--speaker-device", "{speaker_device}",
   "--mic-device", "{mic_device}",
   "--volume", "{volume}",
+  "--idle-timeout-secs", "{idle_timeout_secs}",
+  "--max-session-secs", "{max_session_secs}",
+  "--stt-model", "{stt_model}",
 ]
 
 # The mic and speaker are the audio device; the motors and face display are motor_display.
@@ -44,7 +47,32 @@ min = 0.0
 max = 3.0
 description = "Output gain; 1.0 is the voice's own level."
 
+[params.idle_timeout_secs]
+type = "float"
+default = 25.0
+min = 5.0
+max = 600.0
+description = "Go back to sleep after this many seconds without anyone talking. Keep it under 30, where ElevenLabs would start asking if you are still there."
+
+[params.max_session_secs]
+type = "float"
+default = 600.0
+min = 30.0
+max = 3600.0
+description = "Longest one conversation may run before the robot goes back to sleep, as a cost guard."
+
+[params.stt_model]
+type = "string"
+default = "gpt-4o-mini-transcribe"
+pattern = "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+description = "OpenAI model that transcribes speech near the robot to hear its name."
+
 [env.ELEVENLABS_API_KEY]
 required = true
 description = "ElevenLabs API key, used to start conversations with the agent."
 help_url = "https://elevenlabs.io/app/settings/api-keys"
+
+[env.OPENAI_API_KEY]
+required = true
+description = "OpenAI API key, used to transcribe speech near the robot and check whether it was called by name. Nothing reaches ElevenLabs until it is."
+help_url = "https://platform.openai.com/api-keys"

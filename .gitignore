@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 .env
+
+# Local design notes
+docs/wake-word-and-desk-assistant.md
