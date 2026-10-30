@@ -6,5 +6,3 @@ __pycache__/
 # Local design notes
 docs/wake-word-and-desk-assistant.md
 
-# Desk bridge: local config holds the token
-desk_bridge/config.toml

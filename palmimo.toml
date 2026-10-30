@@ -3,7 +3,7 @@
 
 schema = 1
 name = "elevenlabs-voice"
-description = "Call Palmimo by name to talk with an ElevenLabs agent that moves the robot and can run coding tasks with Claude Code on your laptop. Sleeps when told to or after a quiet spell."
+description = "Call Palmimo by name to talk with an ElevenLabs agent that moves the robot and can run coding tasks with Codex. Sleeps when told to or after a quiet spell."
 
 # Run through `uv run` in the app's directory. {param} is replaced with the value set below.
 command = [
@@ -15,7 +15,10 @@ command = [
   "--idle-timeout-secs", "{idle_timeout_secs}",
   "--max-session-secs", "{max_session_secs}",
   "--stt-model", "{stt_model}",
-  "--desk-bridge-url", "{desk_bridge_url}",
+  "--coding-workdir", "{coding_workdir}",
+  "--codex-model", "{codex_model}",
+  "--codex-sandbox", "{codex_sandbox}",
+  "{block_codex_network}",
 ]
 
 # The mic and speaker are the audio device; the motors and face display are motor_display.
@@ -68,12 +71,31 @@ default = "gpt-4o-mini-transcribe"
 pattern = "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
 description = "OpenAI model that transcribes speech near the robot to hear its name."
 
-[params.desk_bridge_url]
+[params.coding_workdir]
+type = "string"
+default = "~/code"
+pattern = "^[A-Za-z0-9~/._-]{0,128}$"
+max_length = 128
+description = "Folder on the robot with the git repos Codex may work in (each subfolder is a repo; git clone them there). Leave empty to turn coding off."
+
+[params.codex_model]
 type = "string"
 default = ""
-pattern = "^[A-Za-z0-9.:/_-]{0,128}$"
-max_length = 128
-description = "Desk bridge on your laptop for coding tasks with Claude Code, e.g. http://192.168.11.34:8765 (see desk_bridge/README.md). Leave empty to turn coding off."
+pattern = "^[A-Za-z0-9._-]{0,64}$"
+max_length = 64
+description = "Codex model, e.g. gpt-6.1-sol. Leave empty for Codex's default."
+
+[params.codex_sandbox]
+type = "enum"
+choices = ["workspace-write", "read-only", "full-access"]
+default = "workspace-write"
+description = "What Codex may touch: workspace-write edits the repo and runs commands; read-only only reads; full-access has no limits."
+
+[params.block_codex_network]
+type = "bool"
+default = false
+flag = "--no-codex-network"
+description = "Block network access for the commands Codex runs. Off by default, so Codex can git push and install packages."
 
 [env.ELEVENLABS_API_KEY]
 required = true
@@ -82,9 +104,5 @@ help_url = "https://elevenlabs.io/app/settings/api-keys"
 
 [env.OPENAI_API_KEY]
 required = true
-description = "OpenAI API key, used to transcribe speech near the robot and check whether it was called by name. Nothing reaches ElevenLabs until it is."
+description = "OpenAI API key, used to hear the robot's name in nearby speech, and by Codex for coding tasks."
 help_url = "https://platform.openai.com/api-keys"
-
-[env.DESK_BRIDGE_TOKEN]
-required = false
-description = "The token from the desk bridge's config.toml on your laptop. Only needed when desk_bridge_url is set."

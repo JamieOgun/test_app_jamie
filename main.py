@@ -17,10 +17,9 @@ turn, dance, nod, look, show a face, ...) is registered on the agent as a
 client tool when the app starts, and its calls run on the robot here. See
 robot_tools.py.
 
-With ``--desk-bridge-url`` set, the agent can also run coding tasks with
-Claude Code on your laptop, through the desk bridge in desk_bridge/. When a
-task finishes, or a Claude Code session in your terminal needs you, the robot
-wakes by itself (if asleep) and the agent says so. See coding_tools.py.
+With ``--coding-workdir`` set, the agent can also run coding tasks with Codex
+on the repos cloned into that folder on the robot. When a task finishes, the
+robot wakes by itself (if asleep) and the agent says so. See coding_tools.py.
 
 The mic is muted while the robot is talking. Without a ReSpeaker there is no
 echo cancellation, so the agent would otherwise hear its own voice and
@@ -45,6 +44,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
@@ -55,14 +55,13 @@ from palmimo_sdk.io.alsa_devices import resolve_alsa_device
 from palmimo_sdk.robot import Palmimo
 
 import coding_tools
-from coding_tools import Announcement, DeskBridge
+from coding_tools import Announcement, CodexRunner
 from robot_tools import PROMPT_LINES, ToolRunner, build_toolset, client_tool_configs, sync_tools
 from wake import SAMPLE_RATE as WAKE_RATE
 from wake import NameWakeDetector, WakeDetector, WakeEvent
 
 API_KEY_ENV = "ELEVENLABS_API_KEY"
 OPENAI_KEY_ENV = "OPENAI_API_KEY"
-DESK_TOKEN_ENV = "DESK_BRIDGE_TOKEN"
 SIGNED_URL = "https://api.elevenlabs.io/v1/convai/conversation/get-signed-url?agent_id={agent_id}"
 
 #: Mic chunk length sent to the agent.
@@ -348,7 +347,7 @@ async def conversation(
         async def announce(news: Announcement) -> None:
             nonlocal last_heard
             last_heard = time.monotonic()
-            logger.info("laptop: %s in %s: %s", news.kind, news.repo, news.text[:120])
+            logger.info("codex: %s in %s: %s", news.kind, news.repo, news.text[:120])
             await send({"type": "user_message", "text": news.message()})
 
         if isinstance(woken, Announcement):
@@ -436,16 +435,18 @@ async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
     prompt_lines = PROMPT_LINES
     announcements: asyncio.Queue[Announcement] = asyncio.Queue()
     handlers: dict[str, coding_tools.Handler] = {}
-    bridge: DeskBridge | None = None
-    watcher: asyncio.Task[None] | None = None
-    if args.desk_bridge_url:
-        bridge = DeskBridge(args.desk_bridge_url, os.environ.get(DESK_TOKEN_ENV, ""))
-        repos, last_event = await coding_tools.list_repos(bridge)
-        logger.info("coding tasks go to %s (repos: %s)", args.desk_bridge_url, ", ".join(repos) or "unknown yet")
+    codex: CodexRunner | None = None
+    if args.coding_workdir:
+        workdir = Path(args.coding_workdir).expanduser()
+        workdir.mkdir(parents=True, exist_ok=True)
+        codex = CodexRunner(
+            workdir, announcements, model=args.codex_model, sandbox=args.codex_sandbox, network=not args.no_codex_network
+        )
+        repos = codex.repos()
+        logger.info("coding with Codex in %s (repos: %s)", workdir, ", ".join(repos) or "none; git clone some there")
         configs += coding_tools.tool_configs(repos)
         prompt_lines = PROMPT_LINES + coding_tools.PROMPT_LINES
-        handlers = coding_tools.handlers(bridge)
-        watcher = asyncio.create_task(coding_tools.watch_events(bridge, announcements, last_event))
+        handlers = coding_tools.handlers(codex)
     try:
         await asyncio.to_thread(sync_tools, args.agent_id, api_key, configs, prompt_lines)
     except (RuntimeError, OSError, KeyError) as exc:
@@ -499,10 +500,8 @@ async def run(args: argparse.Namespace, api_key: str, robot: Palmimo) -> None:
             logger.info("conversation ended (%s)", reason)
             detector.reset()
             drain(mic_chunks)
-    if watcher is not None:
-        watcher.cancel()
-    if bridge is not None:
-        await bridge.close()
+    if codex is not None:
+        await codex.close()
     logger.info("stopped")
 
 
@@ -520,7 +519,17 @@ def main() -> int:
         "--stt-model", default="gpt-4o-mini-transcribe", help="OpenAI model that transcribes speech to hear the name"
     )
     parser.add_argument(
-        "--desk-bridge-url", default="", help="Desk bridge on your laptop, e.g. http://192.168.1.20:8765; empty for off"
+        "--coding-workdir", default="", help="Folder of git repos Codex may work in, e.g. ~/code; empty for no coding"
+    )
+    parser.add_argument("--codex-model", default="", help="Codex model; empty for Codex's default")
+    parser.add_argument(
+        "--codex-sandbox",
+        default="workspace-write",
+        choices=("read-only", "workspace-write", "full-access"),
+        help="What Codex may touch: read-only, workspace-write (only the repo), or full-access",
+    )
+    parser.add_argument(
+        "--no-codex-network", action="store_true", help="Block network access for Codex's commands (no git push)"
     )
     parser.add_argument(
         "--no-robot", action="store_true", help="Run the tools without motors or face display (for testing off the robot)"
@@ -537,12 +546,6 @@ def main() -> int:
         return 1
     if not os.environ.get(OPENAI_KEY_ENV):
         logger.error("%s is not set. Add it in the Portal's environment variables screen.", OPENAI_KEY_ENV)
-        return 1
-    if args.desk_bridge_url and not args.desk_bridge_url.startswith(("http://", "https://")):
-        logger.error("desk_bridge_url must start with http:// or https://, e.g. http://192.168.1.20:8765")
-        return 1
-    if args.desk_bridge_url and not os.environ.get(DESK_TOKEN_ENV):
-        logger.error("%s is not set but a desk bridge is. Add the bridge's token in the Portal.", DESK_TOKEN_ENV)
         return 1
     try:
         with open_robot(not args.no_robot) as robot:
