@@ -99,6 +99,11 @@ class Bridge:
         if request.path == "/hook":
             if request.remote not in LOCAL_ADDRESSES:
                 return web.json_response({"error": "hooks are only accepted from this machine"}, status=403)
+            # A web page open on this laptop could otherwise post fake hook events
+            # here. Browsers always send Origin, and a JSON body forces a CORS
+            # preflight that this server never answers.
+            if "Origin" in request.headers or request.content_type != "application/json":
+                return web.json_response({"error": "not a Claude Code hook"}, status=403)
         else:
             sent = request.headers.get("Authorization", "").removeprefix("Bearer ")
             if not hmac.compare_digest(sent.encode(), self.token.encode()):
