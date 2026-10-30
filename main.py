@@ -538,6 +538,9 @@ def main() -> int:
     if not os.environ.get(OPENAI_KEY_ENV):
         logger.error("%s is not set. Add it in the Portal's environment variables screen.", OPENAI_KEY_ENV)
         return 1
+    if args.desk_bridge_url and not args.desk_bridge_url.startswith(("http://", "https://")):
+        logger.error("desk_bridge_url must start with http:// or https://, e.g. http://192.168.1.20:8765")
+        return 1
     if args.desk_bridge_url and not os.environ.get(DESK_TOKEN_ENV):
         logger.error("%s is not set but a desk bridge is. Add the bridge's token in the Portal.", DESK_TOKEN_ENV)
         return 1

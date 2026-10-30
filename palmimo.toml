@@ -71,7 +71,7 @@ description = "OpenAI model that transcribes speech near the robot to hear its n
 [params.desk_bridge_url]
 type = "string"
 default = ""
-pattern = "^(https?://[A-Za-z0-9.:_-]{1,120}/?)?$"
+pattern = "^[A-Za-z0-9.:/_-]{0,128}$"
 max_length = 128
 description = "Desk bridge on your laptop for coding tasks with Claude Code, e.g. http://192.168.11.34:8765 (see desk_bridge/README.md). Leave empty to turn coding off."
 
